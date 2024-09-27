@@ -26,3 +26,4 @@ dist-ssr
 # Ignorar archivos sensibles
 .env
 credenciales.json
+reservaslaboratorio.json

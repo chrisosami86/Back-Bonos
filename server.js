@@ -10,16 +10,16 @@ app.use(cors());
 app.use(express.json());
 
 // Autenticación con las credenciales de servicio
-const KEYFILEPATH = process.env.GOOGLE_APPLICATION_CREDENTIALS; // Reemplaza con la ruta a tu archivo JSON
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
+// Usamos las credenciales directamente desde la variable de entorno como un objeto JSON
 const auth = new google.auth.GoogleAuth({
-    keyFile: KEYFILEPATH,
+    credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON), // Obtenemos las credenciales del JSON desde la variable de entorno
     scopes: SCOPES,
 });
 
 // Configura el ID de tu hoja de cálculo
-const SHEET_ID = process.env.SHEET_ID; // Reemplaza con tu ID
+const SHEET_ID = process.env.SHEET_ID; // ID de la hoja
 
 // Ruta para obtener los bonos disponibles
 app.get('/bonos', async (req, res) => {
@@ -61,7 +61,7 @@ app.put('/bonos', async (req, res) => {
         
         await sheets.spreadsheets.values.append({
             spreadsheetId: SHEET_ID,
-            range: 'Hoja1!A2:F', // Cambia 'Sheet1' por el nombre de tu hoja y A2:F según la cantidad de columnas
+            range: 'Hoja1!A2:F', // Cambia 'Hoja1' por el nombre de tu hoja y A2:F según la cantidad de columnas
             valueInputOption: 'USER_ENTERED',
             resource: { values: registroData },
         });
