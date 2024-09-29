@@ -14,12 +14,12 @@ const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 
 // Usamos las credenciales directamente desde la variable de entorno como un objeto JSON
 const auth = new google.auth.GoogleAuth({
-    credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON), // Obtenemos las credenciales del JSON desde la variable de entorno
+    credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
     scopes: SCOPES,
 });
 
 // Configura el ID de tu hoja de cálculo
-const SHEET_ID = process.env.SHEET_ID; // ID de la hoja
+const SHEET_ID = process.env.SHEET_ID;
 
 // Ruta para obtener los bonos disponibles
 app.get('/bonos', async (req, res) => {
@@ -37,6 +37,27 @@ app.get('/bonos', async (req, res) => {
     }
 });
 
+// Nueva ruta para verificar la disponibilidad de bonos
+app.get('/bonos/disponibles', async (req, res) => {
+    try {
+        const sheets = google.sheets({ version: 'v4', auth });
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: SHEET_ID,
+            range: 'A1', // Cambia según la celda donde tienes los bonos
+        });
+        const bonosDisponibles = parseInt(response.data.values[0][0]);
+
+        if (bonosDisponibles <= 0) {
+            return res.json({ mensaje: '¡Los bonos se han agotado!' });
+        }
+
+        res.json({ mensaje: 'Hay bonos disponibles', bonosDisponibles });
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error al verificar la disponibilidad de bonos');
+    }
+});
+
 // Ruta para registrar datos y actualizar los bonos
 app.put('/bonos', async (req, res) => {
     const { nuevosBonos, fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
@@ -51,7 +72,7 @@ app.put('/bonos', async (req, res) => {
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: SHEET_ID,
-            range: 'A1', // Cambia según la celda donde tienes los bonos
+            range: 'A1',
             valueInputOption: 'USER_ENTERED',
             resource: bodyUpdate,
         });
@@ -61,7 +82,7 @@ app.put('/bonos', async (req, res) => {
         
         await sheets.spreadsheets.values.append({
             spreadsheetId: SHEET_ID,
-            range: 'Hoja1!A2:F', // Cambia 'Hoja1' por el nombre de tu hoja y A2:F según la cantidad de columnas
+            range: 'Hoja1!A2:F',
             valueInputOption: 'USER_ENTERED',
             resource: { values: registroData },
         });
