@@ -11,8 +11,6 @@ app.use(express.json());
 
 // Autenticación con las credenciales de servicio
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-
-// Usamos las credenciales directamente desde la variable de entorno como un objeto JSON
 const auth = new google.auth.GoogleAuth({
     credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
     scopes: SCOPES,
@@ -30,20 +28,21 @@ app.get('/bonos', async (req, res) => {
             range: 'A1', // Cambia según la celda donde tienes los bonos
         });
         const bonosDisponibles = parseInt(response.data.values[0][0]);
+
         res.json({ bonosDisponibles });
     } catch (error) {
-        console.error(error);
+        console.error('Error al obtener los bonos disponibles:', error);
         res.status(500).send('Error al obtener los bonos disponibles');
     }
 });
 
-// Nueva ruta para verificar la disponibilidad de bonos
+// Ruta para verificar la disponibilidad de bonos
 app.get('/bonos/disponibles', async (req, res) => {
     try {
         const sheets = google.sheets({ version: 'v4', auth });
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SHEET_ID,
-            range: 'A1', // Cambia según la celda donde tienes los bonos
+            range: 'A1', 
         });
         const bonosDisponibles = parseInt(response.data.values[0][0]);
 
@@ -53,7 +52,7 @@ app.get('/bonos/disponibles', async (req, res) => {
 
         res.json({ mensaje: 'Hay bonos disponibles', bonosDisponibles });
     } catch (error) {
-        console.error(error);
+        console.error('Error al verificar la disponibilidad de bonos:', error);
         res.status(500).send('Error al verificar la disponibilidad de bonos');
     }
 });
@@ -89,7 +88,7 @@ app.put('/bonos', async (req, res) => {
 
         res.send('Bonos actualizados y datos registrados');
     } catch (error) {
-        console.error(error);
+        console.error('Error al actualizar los bonos o registrar los datos:', error);
         res.status(500).send('Error al actualizar los bonos o registrar los datos');
     }
 });
