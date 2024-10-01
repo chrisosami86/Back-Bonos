@@ -19,6 +19,9 @@ const auth = new google.auth.GoogleAuth({
 // Configura el ID de tu hoja de cálculo
 const SHEET_ID = process.env.SHEET_ID;
 
+// Mutex para bloquear las peticiones concurrentes
+let lock = false;
+
 // Ruta para obtener los bonos disponibles
 app.get('/bonos', async (req, res) => {
     try {
@@ -42,7 +45,7 @@ app.get('/bonos/disponibles', async (req, res) => {
         const sheets = google.sheets({ version: 'v4', auth });
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SHEET_ID,
-            range: 'A1', 
+            range: 'A1',
         });
         const bonosDisponibles = parseInt(response.data.values[0][0]);
 
@@ -57,13 +60,19 @@ app.get('/bonos/disponibles', async (req, res) => {
     }
 });
 
-// Ruta para registrar datos y actualizar los bonos
+// Ruta para registrar datos y actualizar los bonos con mutex
 app.put('/bonos', async (req, res) => {
+    if (lock) {
+        return res.status(429).json({ mensaje: 'Demasiadas solicitudes, intente nuevamente más tarde.' });
+    }
+
+    lock = true;  // Bloquea el acceso a nuevas solicitudes
+
     const { nuevosBonos, fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
 
     try {
         const sheets = google.sheets({ version: 'v4', auth });
-        
+
         // Actualizar los bonos disponibles
         const bodyUpdate = {
             values: [[nuevosBonos]],
@@ -78,7 +87,7 @@ app.put('/bonos', async (req, res) => {
 
         // Registrar los datos del formulario en una nueva fila
         const registroData = [[fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo]];
-        
+
         await sheets.spreadsheets.values.append({
             spreadsheetId: SHEET_ID,
             range: 'Hoja1!A2:F',
@@ -90,6 +99,8 @@ app.put('/bonos', async (req, res) => {
     } catch (error) {
         console.error('Error al actualizar los bonos o registrar los datos:', error);
         res.status(500).send('Error al actualizar los bonos o registrar los datos');
+    } finally {
+        lock = false;  // Libera el bloqueo al finalizar
     }
 });
 
