@@ -16,7 +16,7 @@
 
 **5.** Dentro del archivo ```.env``` debe tener las siguientes variables.
 
-* SHEET_ID = El ID de la hoja de cálculo donde necesitamos los registros (Sin comillas)
-* GOOGLE_APPLICATION_CREDENTIALS_JSON = 'Todo el contenido del archivo de credenciales .JSON de Google' (dentro de las comillas);
+* **SHEET_ID =** El ID de la hoja de cálculo donde necesitamos los registros (Sin comillas)
+* **GOOGLE_APPLICATION_CREDENTIALS_JSON =** 'Todo el contenido del archivo de credenciales ```.JSON``` de Google' (dentro de las comillas);
 
 **7.** Node server.js en la terminal y probar
