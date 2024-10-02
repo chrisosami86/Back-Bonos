@@ -22,22 +22,58 @@ const SHEET_ID = process.env.SHEET_ID;
 // Mutex para bloquear las peticiones concurrentes
 let lock = false;
 
-// Ruta para obtener los bonos disponibles
-app.get('/bonos', async (req, res) => {
+// Ruta para registrar datos y actualizar los bonos con verificación atómica
+app.put('/bonos', async (req, res) => {
+    if (lock) {
+        return res.status(429).json({ mensaje: 'Demasiadas solicitudes, intente nuevamente más tarde.' });
+    }
+
+    lock = true;  // Bloquea el acceso a nuevas solicitudes mientras se procesa una
+
+    const { fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
+
     try {
         const sheets = google.sheets({ version: 'v4', auth });
+
+        // Leer los bonos disponibles
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SHEET_ID,
-            range: 'A1', // Cambia según la celda donde tienes los bonos
+            range: 'A1',
         });
-        const bonosDisponibles = parseInt(response.data.values[0][0]);
+        let bonosDisponibles = parseInt(response.data.values[0][0]);
 
-        res.json({ bonosDisponibles });
+        // Verificar si hay bonos disponibles
+        if (bonosDisponibles <= 0) {
+            return res.status(400).json({ mensaje: '¡Los bonos se han agotado!' });
+        }
+
+        // Actualizar los bonos disponibles y restar 1
+        const nuevosBonos = bonosDisponibles - 1;
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: 'A1',
+            valueInputOption: 'USER_ENTERED',
+            resource: { values: [[nuevosBonos]] },
+        });
+
+        // Registrar los datos del formulario en una nueva fila
+        const registroData = [[fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo]];
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: SHEET_ID,
+            range: 'Hoja1!A2:F',
+            valueInputOption: 'USER_ENTERED',
+            resource: { values: registroData },
+        });
+
+        res.send('Bono registrado exitosamente y bonos actualizados.');
     } catch (error) {
-        console.error('Error al obtener los bonos disponibles:', error);
-        res.status(500).send('Error al obtener los bonos disponibles');
+        console.error('Error al actualizar los bonos o registrar los datos:', error);
+        res.status(500).send('Error al actualizar los bonos o registrar los datos');
+    } finally {
+        lock = false;  // Libera el bloqueo al finalizar
     }
 });
+
 
 // Ruta para verificar la disponibilidad de bonos
 app.get('/bonos/disponibles', async (req, res) => {
