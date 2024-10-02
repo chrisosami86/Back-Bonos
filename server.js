@@ -21,14 +21,24 @@ const SHEET_ID = process.env.SHEET_ID;
 
 // Mutex para bloquear las peticiones concurrentes
 let lock = false;
+let waitingQueue = [];  // Cola para manejar solicitudes en espera
 
-// Ruta para registrar datos y actualizar los bonos con verificación atómica
-app.put('/bonos', async (req, res) => {
+// Función para procesar la cola de espera
+const processWaitingQueue = () => {
+    if (waitingQueue.length > 0 && !lock) {
+        const nextRequest = waitingQueue.shift();
+        handleRequest(nextRequest.req, nextRequest.res);
+    }
+};
+
+// Función para manejar la solicitud de actualización y registro de datos
+const handleRequest = async (req, res) => {
     if (lock) {
-        return res.status(429).json({ mensaje: 'Demasiadas solicitudes, intente nuevamente más tarde.' });
+        // Si está bloqueado, añadimos la solicitud a la cola de espera
+        return waitingQueue.push({ req, res });
     }
 
-    lock = true;  // Bloquea el acceso a nuevas solicitudes mientras se procesa una
+    lock = true;  // Bloqueamos el acceso mientras procesamos la solicitud
 
     const { fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
 
@@ -70,10 +80,15 @@ app.put('/bonos', async (req, res) => {
         console.error('Error al actualizar los bonos o registrar los datos:', error);
         res.status(500).send('Error al actualizar los bonos o registrar los datos');
     } finally {
-        lock = false;  // Libera el bloqueo al finalizar
+        lock = false;  // Liberar el bloqueo
+        processWaitingQueue();  // Procesar la siguiente solicitud en la cola
     }
-});
+};
 
+// Ruta principal que maneja la actualización de bonos y registro
+app.put('/bonos', async (req, res) => {
+    handleRequest(req, res);
+});
 
 // Ruta para verificar la disponibilidad de bonos
 app.get('/bonos/disponibles', async (req, res) => {
@@ -93,50 +108,6 @@ app.get('/bonos/disponibles', async (req, res) => {
     } catch (error) {
         console.error('Error al verificar la disponibilidad de bonos:', error);
         res.status(500).send('Error al verificar la disponibilidad de bonos');
-    }
-});
-
-// Ruta para registrar datos y actualizar los bonos con mutex
-app.put('/bonos', async (req, res) => {
-    if (lock) {
-        return res.status(429).json({ mensaje: 'Demasiadas solicitudes, intente nuevamente más tarde.' });
-    }
-
-    lock = true;  // Bloquea el acceso a nuevas solicitudes
-
-    const { nuevosBonos, fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
-
-    try {
-        const sheets = google.sheets({ version: 'v4', auth });
-
-        // Actualizar los bonos disponibles
-        const bodyUpdate = {
-            values: [[nuevosBonos]],
-        };
-
-        await sheets.spreadsheets.values.update({
-            spreadsheetId: SHEET_ID,
-            range: 'A1',
-            valueInputOption: 'USER_ENTERED',
-            resource: bodyUpdate,
-        });
-
-        // Registrar los datos del formulario en una nueva fila
-        const registroData = [[fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo]];
-
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: SHEET_ID,
-            range: 'Hoja1!A2:F',
-            valueInputOption: 'USER_ENTERED',
-            resource: { values: registroData },
-        });
-
-        res.send('Bonos actualizados y datos registrados');
-    } catch (error) {
-        console.error('Error al actualizar los bonos o registrar los datos:', error);
-        res.status(500).send('Error al actualizar los bonos o registrar los datos');
-    } finally {
-        lock = false;  // Libera el bloqueo al finalizar
     }
 });
 
