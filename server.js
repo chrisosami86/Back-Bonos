@@ -152,6 +152,42 @@ app.get('/bonos/disponibles', async (req, res) => {
     }
 });
 
+//Ruta de inicio de sesion
+app.post('/login', (req, res) => {
+    const { usuario, password } = req.body;
+
+    if (usuario === process.env.ADMIN_USER && password === process.env.ADMIN_PASSWORD) {
+        res.json({ exito: true });
+    } else {
+        res.json({ exito: false });
+    }
+});
+
+//Ruta actualizar bonos desde administrador
+app.post('/bonos/cargar', async (req, res) => {
+    const { bonos } = req.body;
+
+    try {
+        // Actualizar en Redis
+        await redisClient.set('bonos_disponibles', bonos, { EX: 3600 });
+
+        // Actualizar en Google Sheets
+        const sheets = google.sheets({ version: 'v4', auth });
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: 'A1',
+            valueInputOption: 'USER_ENTERED',
+            resource: { values: [[bonos]] },
+        });
+
+        res.json({ mensaje: 'Bonos actualizados correctamente' });
+    } catch (error) {
+        console.error('Error al actualizar los bonos:', error);
+        res.status(500).json({ mensaje: 'Error al actualizar los bonos' });
+    }
+});
+
+
 // Iniciar el servidor
 app.listen(PORT, () => {
     console.log(`Servidor corriendo en http://localhost:${PORT}`);
