@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Autenticación con las credenciales de servicio
+// Autenticación con las credenciales de servicio de Google
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const auth = new google.auth.GoogleAuth({
     credentials: JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON),
@@ -21,16 +21,21 @@ const auth = new google.auth.GoogleAuth({
 // Configura el ID de tu hoja de cálculo
 const SHEET_ID = process.env.SHEET_ID;
 
-// Crear el cliente Redis
+// Crear el cliente Redis conectado a Upstash
 const redisClient = redis.createClient({
-    url: 'redis://localhost:6379',  // Conectado a Redis localmente (puedes cambiar esto luego al usar Upstash)
+    url: process.env.REDIS_URL,  // URL de Redis proporcionada por Upstash
+    password: process.env.REDIS_PASSWORD,  // Contraseña proporcionada por Upstash
+    socket: {
+        tls: true,  // Usar TLS/SSL ya que está habilitado en Upstash
+        rejectUnauthorized: false  // Asegura que el certificado SSL no sea rechazado
+    }
 });
 
 redisClient.on('error', (err) => console.error('Error con Redis:', err));
 
 // Conectarse a Redis
 redisClient.connect().then(() => {
-    console.log('Conectado a Redis');
+    console.log('Conectado a Redis en Upstash');
 }).catch(err => console.error('Error al conectar a Redis:', err));
 
 // Función para manejar la solicitud de actualización y registro de datos
@@ -95,7 +100,7 @@ const handleRequest = async (req, res) => {
     }
 };
 
-//Actualizar bonos en redis
+// Sincronizar bonos en Redis con Google Sheets
 app.get('/sync-bonos', async (req, res) => {
     try {
         const sheets = google.sheets({ version: 'v4', auth });
@@ -113,7 +118,6 @@ app.get('/sync-bonos', async (req, res) => {
         res.status(500).send('Error al sincronizar los bonos');
     }
 });
-
 
 // Ruta principal que maneja la actualización de bonos y registro
 app.put('/bonos', async (req, res) => {
@@ -152,7 +156,7 @@ app.get('/bonos/disponibles', async (req, res) => {
     }
 });
 
-//Ruta de inicio de sesion
+// Ruta de inicio de sesión
 app.post('/login', (req, res) => {
     const { usuario, password } = req.body;
 
@@ -163,7 +167,7 @@ app.post('/login', (req, res) => {
     }
 });
 
-//Ruta actualizar bonos desde administrador
+// Ruta para cargar nuevos bonos desde el administrador
 app.post('/bonos/cargar', async (req, res) => {
     const { bonos } = req.body;
 
@@ -186,7 +190,6 @@ app.post('/bonos/cargar', async (req, res) => {
         res.status(500).json({ mensaje: 'Error al actualizar los bonos' });
     }
 });
-
 
 // Iniciar el servidor
 app.listen(PORT, () => {
