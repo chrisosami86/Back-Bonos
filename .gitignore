@@ -27,5 +27,3 @@ dist-ssr
 .env
 credenciales.json
 reservaslaboratorio.json
-node_modules/
-*.json.bak
