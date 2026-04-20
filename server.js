@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Middleware ───────────────────────────────────────────────
 app.use(cors());
-app.use(express.json({limit: '50mb'}));
+app.use(express.json({ limit: '50mb' }));
 
 // ─── Autenticación Google ─────────────────────────────────────
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
@@ -25,52 +25,51 @@ const redisClient = redis.createClient({
     url: process.env.REDIS_URL,
     ...(process.env.REDIS_PASSWORD && { password: process.env.REDIS_PASSWORD }),
     ...(process.env.REDIS_TLS === 'true' && {
-        socket: {
-            tls: true,
-            rejectUnauthorized: false
-        }
+        socket: { tls: true, rejectUnauthorized: false }
     })
 });
 
 redisClient.on('error', (err) => console.error('Error con Redis:', err));
-
 redisClient.connect()
     .then(() => console.log('Conectado a Redis correctamente'))
     .catch(err => console.error('Error al conectar a Redis:', err));
 
-// ─── Función utilitaria ───────────────────────────────────────
-// Calcula los segundos que faltan para la medianoche
-// Así los registros del día se limpian automáticamente a las 12:00am
+// ─── Utilidades ───────────────────────────────────────────────
 const segundosHastaMedianoche = () => {
     const ahora = new Date();
     const medianoche = new Date();
-    medianoche.setHours(24, 0, 0, 0); // Próxima medianoche
+    medianoche.setHours(24, 0, 0, 0);
     return Math.floor((medianoche - ahora) / 1000);
 };
 
-// ─── Middlewares de seguridad ─────────────────────────────────
+// Reintenta una función hasta N veces con pausa entre intentos
+// Esto evita perder registros cuando Sheets falla momentáneamente
+const conReintentos = async (fn, intentos = 3, pausaMs = 500) => {
+    for (let i = 1; i <= intentos; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            console.error(`Intento ${i} fallido:`, error.message);
+            if (i === intentos) throw error; // Si fue el último intento, lanzar el error
+            await new Promise(r => setTimeout(r, pausaMs * i)); // Pausa progresiva
+        }
+    }
+};
 
-// 1. Verifica que la petición viene del frontend autorizado
+// ─── Middlewares de seguridad ─────────────────────────────────
 const verificarToken = (req, res, next) => {
     const token = req.headers['x-frontend-token'];
-
     if (!token || token !== process.env.FRONTEND_KEY_APP) {
         return res.status(401).json({ mensaje: 'No autorizado' });
     }
-
     next();
 };
 
-// 2. Verifica que todos los campos lleguen correctos
 const validarDatos = (req, res, next) => {
     const { codigoEstudiante } = req.body;
-
-    // Ahora solo validamos que venga el código
-    // Los demás datos los trae el backend desde Redis
     if (!codigoEstudiante) {
         return res.status(400).json({ mensaje: 'El código de estudiante es obligatorio' });
     }
-
     next();
 };
 
@@ -80,10 +79,10 @@ const handleRequest = async (req, res) => {
 
     try {
         // 1. Verificar si el estudiante ya registró hoy
-        const estudianteYaRegistrado = await redisClient.get(`registrado:${codigoEstudiante}`);
-        if (estudianteYaRegistrado) {
-            return res.status(400).json({ 
-                mensaje: 'Ya registraste un bono hoy con este código' 
+        const yaRegistrado = await redisClient.get(`registrado:${codigoEstudiante}`);
+        if (yaRegistrado) {
+            return res.status(400).json({
+                mensaje: 'Ya registraste un bono hoy con este código'
             });
         }
 
@@ -97,8 +96,8 @@ const handleRequest = async (req, res) => {
         const estudiante = estudiantes[codigoEstudiante];
 
         if (!estudiante) {
-            return res.status(404).json({ 
-                mensaje: 'Código no encontrado, verifica que sea correcto' 
+            return res.status(404).json({
+                mensaje: 'Código no encontrado, verifica que sea correcto'
             });
         }
 
@@ -107,8 +106,7 @@ const handleRequest = async (req, res) => {
         if (!bonosDisponibles) {
             const sheets = google.sheets({ version: 'v4', auth });
             const response = await sheets.spreadsheets.values.get({
-                spreadsheetId: SHEET_ID,
-                range: 'A1',
+                spreadsheetId: SHEET_ID, range: 'A1',
             });
             bonosDisponibles = parseInt(response.data.values[0][0]);
             await redisClient.set('bonos_disponibles', bonosDisponibles, { EX: 3600 });
@@ -127,49 +125,74 @@ const handleRequest = async (req, res) => {
             return res.status(400).json({ mensaje: '¡Los bonos se han agotado!' });
         }
 
-        // 5. Registrar en Google Sheets
+        // 5. Armar el objeto del registro completo
+        const fechaHora = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+        const registro = {
+            fechaHora,
+            codigo: codigoEstudiante,
+            documento: estudiante.documento_identidad,
+            nombre: estudiante.nombre,
+            email: estudiante.email,
+            programa: estudiante.programa_academico,
+            recibo: 'SI',
+            sincronizado: false  // ← empieza como pendiente
+        };
+
+        // 6. Guardar registro completo en Redis ANTES de intentar Sheets
+        // Así aunque Sheets falle, los datos están seguros
+        const expiracion = { EX: segundosHastaMedianoche() };
+        await redisClient.set(
+            `registrado:${codigoEstudiante}`,
+            JSON.stringify(registro),
+            expiracion
+        );
+
+        // 7. Intentar escribir en Sheets con hasta 3 reintentos
         try {
-            const sheets = google.sheets({ version: 'v4', auth });
-            const fechaHora = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+            await conReintentos(async () => {
+                const sheets = google.sheets({ version: 'v4', auth });
 
-            await sheets.spreadsheets.values.update({
-                spreadsheetId: SHEET_ID,
-                range: 'A1',
-                valueInputOption: 'USER_ENTERED',
-                resource: { values: [[nuevosBonos]] },
+                await sheets.spreadsheets.values.update({
+                    spreadsheetId: SHEET_ID,
+                    range: 'A1',
+                    valueInputOption: 'USER_ENTERED',
+                    resource: { values: [[nuevosBonos]] },
+                });
+
+                await sheets.spreadsheets.values.append({
+                    spreadsheetId: SHEET_ID,
+                    range: 'Hoja1!A2:G',
+                    valueInputOption: 'USER_ENTERED',
+                    resource: {
+                        values: [[
+                            registro.fechaHora,
+                            registro.codigo,
+                            registro.documento,
+                            registro.nombre,
+                            registro.email,
+                            registro.programa,
+                            registro.recibo
+                        ]]
+                    },
+                });
             });
 
-            await sheets.spreadsheets.values.append({
-                spreadsheetId: SHEET_ID,
-                range: 'Hoja1!A2:F',
-                valueInputOption: 'USER_ENTERED',
-                resource: { 
-                    values: [[
-                        fechaHora,
-                        codigoEstudiante,
-                        estudiante.documento_identidad,
-                        estudiante.nombre,
-                        estudiante.email,
-                        estudiante.programa_academico,
-                        'SI'  // recibo siempre es SI
-                    ]] 
-                },
-            });
-
-            // 6. Marcar estudiante como registrado hasta medianoche
-            await redisClient.set(`registrado:${codigoEstudiante}`, '1', {
-                EX: segundosHastaMedianoche()
-            });
-
-            res.json({ mensaje: 'Bono registrado exitosamente' });
+            // Sheets funcionó — actualizar registro como sincronizado
+            registro.sincronizado = true;
+            await redisClient.set(
+                `registrado:${codigoEstudiante}`,
+                JSON.stringify(registro),
+                expiracion
+            );
 
         } catch (errorSheets) {
-            console.error('Error con Google Sheets, revirtiendo:', errorSheets);
-            await redisClient.incr('bonos_disponibles');
-            res.status(500).json({ 
-                mensaje: 'Error al registrar. Tu bono no fue descontado, intenta de nuevo.' 
-            });
+            // Sheets falló los 3 intentos — el registro queda pendiente en Redis
+            // No revertimos el bono porque el registro SÍ está guardado en Redis
+            console.error('Sheets falló después de 3 intentos, queda pendiente:', errorSheets.message);
         }
+
+        // Respondemos exitoso siempre — el registro está seguro en Redis
+        res.json({ mensaje: 'Bono registrado exitosamente' });
 
     } catch (error) {
         console.error('Error general:', error);
@@ -179,16 +202,14 @@ const handleRequest = async (req, res) => {
 
 // ─── Rutas ────────────────────────────────────────────────────
 
-// Pública — solo lectura, no necesita token
+// Pública — bonos disponibles
 app.get('/bonos/disponibles', async (req, res) => {
     try {
         let bonosDisponibles = await redisClient.get('bonos_disponibles');
-
         if (!bonosDisponibles) {
             const sheets = google.sheets({ version: 'v4', auth });
             const response = await sheets.spreadsheets.values.get({
-                spreadsheetId: SHEET_ID,
-                range: 'A1',
+                spreadsheetId: SHEET_ID, range: 'A1',
             });
             bonosDisponibles = parseInt(response.data.values[0][0]);
             await redisClient.set('bonos_disponibles', bonosDisponibles, { EX: 3600 });
@@ -199,7 +220,6 @@ app.get('/bonos/disponibles', async (req, res) => {
         if (bonosDisponibles <= 0) {
             return res.json({ mensaje: '¡Los bonos se han agotado!', bonosDisponibles: 0 });
         }
-
         res.json({ mensaje: 'Hay bonos disponibles', bonosDisponibles });
 
     } catch (error) {
@@ -216,7 +236,6 @@ app.put('/bonos', verificarToken, validarDatos, async (req, res) => {
 // Login administrador
 app.post('/login', (req, res) => {
     const { usuario, password } = req.body;
-
     if (usuario === process.env.ADMIN_USER && password === process.env.ADMIN_PASSWORD) {
         res.json({ exito: true });
     } else {
@@ -227,10 +246,8 @@ app.post('/login', (req, res) => {
 // Protegida — cargar nuevos bonos
 app.post('/bonos/cargar', verificarToken, async (req, res) => {
     const { bonos } = req.body;
-
     try {
         await redisClient.set('bonos_disponibles', bonos, { EX: 3600 });
-
         const sheets = google.sheets({ version: 'v4', auth });
         await sheets.spreadsheets.values.update({
             spreadsheetId: SHEET_ID,
@@ -238,83 +255,121 @@ app.post('/bonos/cargar', verificarToken, async (req, res) => {
             valueInputOption: 'USER_ENTERED',
             resource: { values: [[bonos]] },
         });
-
         res.json({ mensaje: 'Bonos actualizados correctamente' });
-
     } catch (error) {
         console.error('Error al cargar bonos:', error);
         res.status(500).json({ mensaje: 'Error al actualizar los bonos' });
     }
 });
 
-// Protegida — sincronizar Redis con Google Sheets
-app.get('/sync-bonos', verificarToken, async (req, res) => {
+// Protegida — obtener todos los registros del día desde Redis
+app.get('/registros/hoy', verificarToken, async (req, res) => {
     try {
-        const sheets = google.sheets({ version: 'v4', auth });
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
-            range: 'A1',
-        });
-        const bonosDisponibles = parseInt(response.data.values[0][0]);
-        await redisClient.set('bonos_disponibles', bonosDisponibles, { EX: 3600 });
+        // Buscar todas las claves que empiecen con "registrado:"
+        const claves = await redisClient.keys('registrado:*');
 
-        res.json({ mensaje: 'Bonos sincronizados correctamente', bonosDisponibles });
+        if (claves.length === 0) {
+            return res.json({ registros: [], total: 0 });
+        }
+
+        // Obtener el valor de cada clave
+        // Promise.all ejecuta todas las consultas al mismo tiempo, más eficiente
+        const valores = await Promise.all(
+            claves.map(clave => redisClient.get(clave))
+        );
+
+        // Convertir cada valor de texto a objeto
+        const registros = valores
+            .map(v => JSON.parse(v))
+            .sort((a, b) => a.fechaHora.localeCompare(b.fechaHora)); // ordenar por hora
+
+        res.json({ registros, total: registros.length });
 
     } catch (error) {
-        console.error('Error al sincronizar:', error);
-        res.status(500).json({ mensaje: 'Error al sincronizar los bonos' });
+        console.error('Error al obtener registros:', error);
+        res.status(500).json({ mensaje: 'Error al obtener los registros' });
     }
 });
 
-// Protegida — cargar base de datos de estudiantes (usar cada semestre)
-app.post('/estudiantes/cargar', verificarToken, async (req, res) => {
-    const { estudiantes } = req.body;
-
-    // Verificar que llegó la data
-    if (!estudiantes || typeof estudiantes !== 'object') {
-        return res.status(400).json({ mensaje: 'Datos de estudiantes inválidos' });
-    }
-
+// Protegida — sincronizar registros pendientes con Google Sheets
+app.post('/registros/sincronizar', verificarToken, async (req, res) => {
     try {
-        // Guardamos todos los estudiantes en un solo key en Redis
-        // JSON.stringify convierte el objeto a texto para poder guardarlo
-        await redisClient.set('base_estudiantes', JSON.stringify(estudiantes));
+        // Obtener todas las claves de registros
+        const claves = await redisClient.keys('registrado:*');
 
-        const total = Object.keys(estudiantes).length;
-        res.json({ mensaje: `Base de datos cargada correctamente`, total });
+        if (claves.length === 0) {
+            return res.json({ mensaje: 'No hay registros para sincronizar', sincronizados: 0 });
+        }
+
+        const valores = await Promise.all(claves.map(c => redisClient.get(c)));
+        const todos = valores.map(v => JSON.parse(v));
+
+        // Filtrar solo los pendientes
+        const pendientes = todos.filter(r => r.sincronizado === false);
+
+        if (pendientes.length === 0) {
+            return res.json({ mensaje: 'Todos los registros ya están sincronizados', sincronizados: 0 });
+        }
+
+        // Armar las filas para enviar a Sheets de una sola vez
+        const filas = pendientes.map(r => [
+            r.fechaHora,
+            r.codigo,
+            r.documento,
+            r.nombre,
+            r.email,
+            r.programa,
+            r.recibo
+        ]);
+
+        // Enviar a Sheets con reintentos
+        await conReintentos(async () => {
+            const sheets = google.sheets({ version: 'v4', auth });
+            await sheets.spreadsheets.values.append({
+                spreadsheetId: SHEET_ID,
+                range: 'Hoja1!A2:G',
+                valueInputOption: 'USER_ENTERED',
+                resource: { values: filas },
+            });
+        });
+
+        // Marcar todos los pendientes como sincronizados en Redis
+        await Promise.all(
+            pendientes.map(r => {
+                r.sincronizado = true;
+                return redisClient.set(
+                    `registrado:${r.codigo}`,
+                    JSON.stringify(r),
+                    { KEEPTTL: true } // mantener la expiración original
+                );
+            })
+        );
+
+        res.json({
+            mensaje: `${pendientes.length} registros sincronizados correctamente`,
+            sincronizados: pendientes.length
+        });
 
     } catch (error) {
-        console.error('Error al cargar estudiantes:', error);
-        res.status(500).json({ mensaje: 'Error al cargar la base de datos' });
+        console.error('Error al sincronizar:', error);
+        res.status(500).json({ mensaje: 'Error al sincronizar los registros' });
     }
 });
 
 // Pública — buscar estudiante por código
 app.get('/estudiante/:codigo', async (req, res) => {
     const { codigo } = req.params;
-
     try {
-        // Obtener toda la base de estudiantes desde Redis
         const baseEstudiantes = await redisClient.get('base_estudiantes');
-
         if (!baseEstudiantes) {
-            return res.status(404).json({ 
-                mensaje: 'Base de datos no disponible, contacta al administrador' 
-            });
+            return res.status(404).json({ mensaje: 'Base de datos no disponible' });
         }
-
-        // JSON.parse convierte el texto de Redis de vuelta a objeto
         const estudiantes = JSON.parse(baseEstudiantes);
         const estudiante = estudiantes[codigo];
-
         if (!estudiante) {
-            return res.status(404).json({ 
-                mensaje: 'Código no encontrado, verifica que sea correcto' 
-            });
+            return res.status(404).json({ mensaje: 'Código no encontrado' });
         }
-
         res.json({ estudiante });
-
     } catch (error) {
         console.error('Error al buscar estudiante:', error);
         res.status(500).json({ mensaje: 'Error al buscar el estudiante' });
@@ -322,18 +377,39 @@ app.get('/estudiante/:codigo', async (req, res) => {
 });
 
 // Pública — verificar si un estudiante ya registró hoy
+// Ahora devuelve el registro completo si existe
 app.get('/estudiante/:codigo/registro', async (req, res) => {
     const { codigo } = req.params;
     try {
-        const yaRegistrado = await redisClient.get(`registrado:${codigo}`);
-        res.json({ yaRegistrado: !!yaRegistrado });
+        const valor = await redisClient.get(`registrado:${codigo}`);
+        if (!valor) {
+            return res.json({ yaRegistrado: false });
+        }
+        const registro = JSON.parse(valor);
+        res.json({ yaRegistrado: true, registro });
     } catch (error) {
         console.error('Error al verificar registro:', error);
         res.status(500).json({ mensaje: 'Error al verificar registro' });
     }
 });
 
+// Protegida — cargar base de datos de estudiantes
+app.post('/estudiantes/cargar', verificarToken, async (req, res) => {
+    const { estudiantes } = req.body;
+    if (!estudiantes || typeof estudiantes !== 'object') {
+        return res.status(400).json({ mensaje: 'Datos de estudiantes inválidos' });
+    }
+    try {
+        await redisClient.set('base_estudiantes', JSON.stringify(estudiantes));
+        const total = Object.keys(estudiantes).length;
+        res.json({ mensaje: 'Base de datos cargada correctamente', total });
+    } catch (error) {
+        console.error('Error al cargar estudiantes:', error);
+        res.status(500).json({ mensaje: 'Error al cargar la base de datos' });
+    }
+});
+
 // ─── Iniciar servidor ─────────────────────────────────────────
-app.listen(PORT,'0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
