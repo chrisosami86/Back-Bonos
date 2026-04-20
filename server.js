@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Middleware ───────────────────────────────────────────────
 app.use(cors());
-app.use(express.json());
+app.use(express.json({limit: '50mb'}));
 
 // ─── Autenticación Google ─────────────────────────────────────
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
@@ -63,15 +63,12 @@ const verificarToken = (req, res, next) => {
 
 // 2. Verifica que todos los campos lleguen correctos
 const validarDatos = (req, res, next) => {
-    const { fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
+    const { codigoEstudiante } = req.body;
 
-    if (!fechaHora || !correo || !codigoEstudiante || !numeroIdentificacion || !programaAcademico || !recibo) {
-        return res.status(400).json({ mensaje: 'Todos los campos son obligatorios' });
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(correo)) {
-        return res.status(400).json({ mensaje: 'El correo no tiene un formato válido' });
+    // Ahora solo validamos que venga el código
+    // Los demás datos los trae el backend desde Redis
+    if (!codigoEstudiante) {
+        return res.status(400).json({ mensaje: 'El código de estudiante es obligatorio' });
     }
 
     next();
@@ -79,23 +76,34 @@ const validarDatos = (req, res, next) => {
 
 // ─── Lógica principal de registro ────────────────────────────
 const handleRequest = async (req, res) => {
-    const { fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo } = req.body;
+    const { codigoEstudiante } = req.body;
 
     try {
-        // 1. Verificar si el estudiante ya registró un bono HOY
-        // Usamos codigoEstudiante porque es único por persona
-        // El recibo es solo si/no, no sirve para identificar
-        const estudianteYaRegistrado = await redisClient.get(`estudiante:${codigoEstudiante}`);
+        // 1. Verificar si el estudiante ya registró hoy
+        const estudianteYaRegistrado = await redisClient.get(`registrado:${codigoEstudiante}`);
         if (estudianteYaRegistrado) {
             return res.status(400).json({ 
-                mensaje: 'Ya registraste un bono hoy con este código de estudiante' 
+                mensaje: 'Ya registraste un bono hoy con este código' 
             });
         }
 
-        // 2. Obtener bonos disponibles desde Redis
-        let bonosDisponibles = await redisClient.get('bonos_disponibles');
+        // 2. Buscar datos del estudiante en Redis
+        const baseEstudiantes = await redisClient.get('base_estudiantes');
+        if (!baseEstudiantes) {
+            return res.status(500).json({ mensaje: 'Base de datos no disponible' });
+        }
 
-        // Si Redis no tiene el dato, buscarlo en la hoja de cálculo
+        const estudiantes = JSON.parse(baseEstudiantes);
+        const estudiante = estudiantes[codigoEstudiante];
+
+        if (!estudiante) {
+            return res.status(404).json({ 
+                mensaje: 'Código no encontrado, verifica que sea correcto' 
+            });
+        }
+
+        // 3. Verificar bonos disponibles
+        let bonosDisponibles = await redisClient.get('bonos_disponibles');
         if (!bonosDisponibles) {
             const sheets = google.sheets({ version: 'v4', auth });
             const response = await sheets.spreadsheets.values.get({
@@ -108,26 +116,22 @@ const handleRequest = async (req, res) => {
             bonosDisponibles = parseInt(bonosDisponibles);
         }
 
-        // 3. Verificar si quedan bonos
         if (bonosDisponibles <= 0) {
             return res.status(400).json({ mensaje: '¡Los bonos se han agotado!' });
         }
 
-        // 4. Decrementar bonos en Redis de forma atómica
-        // "Atómica" significa que aunque lleguen 800 peticiones al mismo tiempo,
-        // Redis las procesa una por una sin perder el conteo
+        // 4. Decrementar bonos de forma atómica
         const nuevosBonos = await redisClient.decr('bonos_disponibles');
-
         if (nuevosBonos < 0) {
-            await redisClient.incr('bonos_disponibles'); // Revertir si quedó negativo
+            await redisClient.incr('bonos_disponibles');
             return res.status(400).json({ mensaje: '¡Los bonos se han agotado!' });
         }
 
-        // 5. Intentar registrar en Google Sheets
+        // 5. Registrar en Google Sheets
         try {
             const sheets = google.sheets({ version: 'v4', auth });
+            const fechaHora = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
 
-            // Actualizar cantidad de bonos en la hoja
             await sheets.spreadsheets.values.update({
                 spreadsheetId: SHEET_ID,
                 range: 'A1',
@@ -135,30 +139,35 @@ const handleRequest = async (req, res) => {
                 resource: { values: [[nuevosBonos]] },
             });
 
-            // Registrar datos del estudiante en la hoja
             await sheets.spreadsheets.values.append({
                 spreadsheetId: SHEET_ID,
                 range: 'Hoja1!A2:F',
                 valueInputOption: 'USER_ENTERED',
                 resource: { 
-                    values: [[fechaHora, correo, codigoEstudiante, numeroIdentificacion, programaAcademico, recibo]] 
+                    values: [[
+                        fechaHora,
+                        codigoEstudiante,
+                        estudiante.documento_identidad,
+                        estudiante.nombre,
+                        estudiante.email,
+                        estudiante.programa_academico,
+                        'SI'  // recibo siempre es SI
+                    ]] 
                 },
             });
 
-            // 6. Todo salió bien — marcar estudiante como registrado hasta medianoche
-            await redisClient.set(`estudiante:${codigoEstudiante}`, '1', {
+            // 6. Marcar estudiante como registrado hasta medianoche
+            await redisClient.set(`registrado:${codigoEstudiante}`, '1', {
                 EX: segundosHastaMedianoche()
             });
 
             res.json({ mensaje: 'Bono registrado exitosamente' });
 
         } catch (errorSheets) {
-            // Si Google Sheets falla, revertimos el bono para que el estudiante pueda reintentar
-            console.error('Error con Google Sheets, revirtiendo bono:', errorSheets);
+            console.error('Error con Google Sheets, revirtiendo:', errorSheets);
             await redisClient.incr('bonos_disponibles');
-
             res.status(500).json({ 
-                mensaje: 'Error al registrar en la hoja. Tu bono no fue descontado, intenta de nuevo.' 
+                mensaje: 'Error al registrar. Tu bono no fue descontado, intenta de nuevo.' 
             });
         }
 
@@ -257,7 +266,74 @@ app.get('/sync-bonos', verificarToken, async (req, res) => {
     }
 });
 
+// Protegida — cargar base de datos de estudiantes (usar cada semestre)
+app.post('/estudiantes/cargar', verificarToken, async (req, res) => {
+    const { estudiantes } = req.body;
+
+    // Verificar que llegó la data
+    if (!estudiantes || typeof estudiantes !== 'object') {
+        return res.status(400).json({ mensaje: 'Datos de estudiantes inválidos' });
+    }
+
+    try {
+        // Guardamos todos los estudiantes en un solo key en Redis
+        // JSON.stringify convierte el objeto a texto para poder guardarlo
+        await redisClient.set('base_estudiantes', JSON.stringify(estudiantes));
+
+        const total = Object.keys(estudiantes).length;
+        res.json({ mensaje: `Base de datos cargada correctamente`, total });
+
+    } catch (error) {
+        console.error('Error al cargar estudiantes:', error);
+        res.status(500).json({ mensaje: 'Error al cargar la base de datos' });
+    }
+});
+
+// Pública — buscar estudiante por código
+app.get('/estudiante/:codigo', async (req, res) => {
+    const { codigo } = req.params;
+
+    try {
+        // Obtener toda la base de estudiantes desde Redis
+        const baseEstudiantes = await redisClient.get('base_estudiantes');
+
+        if (!baseEstudiantes) {
+            return res.status(404).json({ 
+                mensaje: 'Base de datos no disponible, contacta al administrador' 
+            });
+        }
+
+        // JSON.parse convierte el texto de Redis de vuelta a objeto
+        const estudiantes = JSON.parse(baseEstudiantes);
+        const estudiante = estudiantes[codigo];
+
+        if (!estudiante) {
+            return res.status(404).json({ 
+                mensaje: 'Código no encontrado, verifica que sea correcto' 
+            });
+        }
+
+        res.json({ estudiante });
+
+    } catch (error) {
+        console.error('Error al buscar estudiante:', error);
+        res.status(500).json({ mensaje: 'Error al buscar el estudiante' });
+    }
+});
+
+// Pública — verificar si un estudiante ya registró hoy
+app.get('/estudiante/:codigo/registro', async (req, res) => {
+    const { codigo } = req.params;
+    try {
+        const yaRegistrado = await redisClient.get(`registrado:${codigo}`);
+        res.json({ yaRegistrado: !!yaRegistrado });
+    } catch (error) {
+        console.error('Error al verificar registro:', error);
+        res.status(500).json({ mensaje: 'Error al verificar registro' });
+    }
+});
+
 // ─── Iniciar servidor ─────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT,'0.0.0.0', () => {
     console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });

@@ -25,5 +25,7 @@ dist-ssr
 
 # Ignorar archivos sensibles
 .env
+estudiantes.json
+cargarEstudiantes.js
 credenciales.json
 reservaslaboratorio.json
