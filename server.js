@@ -43,6 +43,21 @@ const segundosHastaMedianoche = () => {
   return Math.floor((medianoche - ahora) / 1000);
 };
 
+// ─── Caché en memoria ─────────────────────────────────────────
+// Evita parsear el JSON de estudiantes en cada petición
+let cacheEstudiantes = null;
+
+// Agrega esta función después de las utilidades
+const obtenerEstudiantes = async () => {
+    if (cacheEstudiantes) return cacheEstudiantes; // ya está en memoria
+
+    const base = await redisClient.get('base_estudiantes');
+    if (!base) return null;
+
+    cacheEstudiantes = JSON.parse(base);
+    return cacheEstudiantes;
+};
+
 // Reintenta una función hasta N veces con pausa entre intentos
 // Esto evita perder registros cuando Sheets falla momentáneamente
 const conReintentos = async (fn, intentos = 3, pausaMs = 500) => {
@@ -78,173 +93,108 @@ const validarDatos = (req, res, next) => {
 
 // ─── Lógica principal de registro ────────────────────────────
 const handleRequest = async (req, res) => {
-  const { codigoEstudiante } = req.body;
-
-  try {
-    // 1. Verificar si el estudiante ya registró hoy
-    const yaRegistrado = await redisClient.get(
-      `registrado:${codigoEstudiante}`,
-    );
-    if (yaRegistrado) {
-      return res.status(400).json({
-        mensaje: "Ya registraste un bono hoy con este código",
-      });
-    }
-
-    // 2. Buscar datos del estudiante en Redis
-    const baseEstudiantes = await redisClient.get("base_estudiantes");
-    if (!baseEstudiantes) {
-      return res.status(500).json({ mensaje: "Base de datos no disponible" });
-    }
-
-    const estudiantes = JSON.parse(baseEstudiantes);
-    const estudiante = estudiantes[codigoEstudiante];
-
-    if (!estudiante) {
-      return res.status(404).json({
-        mensaje: "Código no encontrado, verifica que sea correcto",
-      });
-    }
-
-    // 3. Verificar bonos disponibles
-    let bonosDisponibles = await redisClient.get("bonos_disponibles");
-    if (!bonosDisponibles) {
-      const sheets = google.sheets({ version: "v4", auth });
-      const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
-        range: "A1",
-      });
-      bonosDisponibles = parseInt(response.data.values[0][0]);
-      await redisClient.set("bonos_disponibles", bonosDisponibles, {
-        EX: 3600,
-      });
-    } else {
-      bonosDisponibles = parseInt(bonosDisponibles);
-    }
-
-    if (bonosDisponibles <= 0) {
-      return res.status(400).json({ mensaje: "¡Los bonos se han agotado!" });
-    }
-
-    // 4. Decrementar bonos de forma atómica
-    const nuevosBonos = await redisClient.decr("bonos_disponibles");
-    if (nuevosBonos < 0) {
-      await redisClient.incr("bonos_disponibles");
-      return res.status(400).json({ mensaje: "¡Los bonos se han agotado!" });
-    }
-
-    // 5. Armar el objeto del registro completo
-    const fechaHora = new Date().toLocaleString("es-CO", {
-      timeZone: "America/Bogota",
-    });
-    const registro = {
-      fechaHora,
-      codigo: codigoEstudiante,
-      documento: estudiante.documento_identidad,
-      nombre: estudiante.nombre,
-      email: estudiante.email,
-      programa: estudiante.programa_academico,
-      recibo: "SI",
-      sincronizado: false, // ← empieza como pendiente
-    };
-
-    // 6. Guardar registro completo en Redis ANTES de intentar Sheets
-    // Así aunque Sheets falle, los datos están seguros
-    const expiracion = { EX: segundosHastaMedianoche() };
-    await redisClient.set(
-      `registrado:${codigoEstudiante}`,
-      JSON.stringify(registro),
-      expiracion,
-    );
-
-    // 7. Intentar escribir en Sheets con hasta 3 reintentos
-    let sheets_exitoso = false;
+    const { codigoEstudiante } = req.body;
 
     try {
-      await conReintentos(async () => {
-        const sheets = google.sheets({ version: "v4", auth });
+        // 1. Verificar si ya registró hoy
+        const yaRegistrado = await redisClient.get(`registrado:${codigoEstudiante}`);
+        if (yaRegistrado) {
+            return res.status(400).json({
+                mensaje: 'Ya registraste un bono hoy con este código'
+            });
+        }
 
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID,
-          range: "A1",
-          valueInputOption: "USER_ENTERED",
-          resource: { values: [[nuevosBonos]] },
-        });
+        // 2. Buscar datos del estudiante en Redis
+        const baseEstudiantes = await redisClient.get('base_estudiantes');
+        if (!baseEstudiantes) {
+            return res.status(500).json({ mensaje: 'Base de datos no disponible' });
+        }
 
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: SHEET_ID,
-          range: "hoja1!A2:G",
-          valueInputOption: "USER_ENTERED",
-          resource: {
-            values: [
-              [
-                registro.fechaHora,
-                registro.codigo,
-                registro.documento,
-                registro.nombre,
-                registro.email,
-                registro.programa,
-                registro.recibo,
-              ],
-            ],
-          },
-        });
+        const estudiantes = JSON.parse(baseEstudiantes);
+        const estudiante = estudiantes[codigoEstudiante];
 
-        sheets_exitoso = true; // ← solo llega aquí si TODO funcionó
-      });
-    } catch (errorSheets) {
-      console.error("Sheets falló después de 3 intentos:", errorSheets.message);
-      sheets_exitoso = false;
+        if (!estudiante) {
+            return res.status(404).json({ mensaje: 'Código no encontrado' });
+        }
+
+        // 3. Verificar bonos disponibles
+        let bonosDisponibles = await redisClient.get('bonos_disponibles');
+        if (!bonosDisponibles) {
+            const sheets = google.sheets({ version: 'v4', auth });
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: SHEET_ID, range: 'A1',
+            });
+            bonosDisponibles = parseInt(response.data.values[0][0]);
+            await redisClient.set('bonos_disponibles', bonosDisponibles, { EX: 3600 });
+        } else {
+            bonosDisponibles = parseInt(bonosDisponibles);
+        }
+
+        if (bonosDisponibles <= 0) {
+            return res.status(400).json({ mensaje: '¡Los bonos se han agotado!' });
+        }
+
+        // 4. Decrementar bonos de forma atómica
+        const nuevosBonos = await redisClient.decr('bonos_disponibles');
+        if (nuevosBonos < 0) {
+            await redisClient.incr('bonos_disponibles');
+            return res.status(400).json({ mensaje: '¡Los bonos se han agotado!' });
+        }
+
+        // 5. Guardar registro en Redis — sincronizado: false siempre
+        // Ya NO intentamos escribir en Sheets aquí
+        // La monitora lo hará manualmente registro por registro
+        const fechaHora = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+        const registro = {
+            fechaHora,
+            codigo: codigoEstudiante,
+            documento: estudiante.documento_identidad,
+            nombre: estudiante.nombre,
+            email: estudiante.email,
+            programa: estudiante.programa_academico,
+            recibo: 'SI',
+            codBono: null,        // ← se llenará cuando la monitora lo asigne
+            sincronizado: false,  // ← siempre empieza pendiente
+        };
+
+        await redisClient.set(
+            `registrado:${codigoEstudiante}`,
+            JSON.stringify(registro),
+            { EX: segundosHastaMedianoche() }
+        );
+
+        res.json({ mensaje: 'Bono registrado exitosamente' });
+
+    } catch (error) {
+        console.error('Error general:', error);
+        res.status(500).json({ mensaje: 'Error interno del servidor' });
     }
-
-    // Solo marcar sincronizado si Sheets realmente funcionó
-    if (sheets_exitoso) {
-      registro.sincronizado = true;
-      await redisClient.set(
-        `registrado:${codigoEstudiante}`,
-        JSON.stringify(registro),
-        expiracion,
-      );
-    }
-
-    res.json({ mensaje: "Bono registrado exitosamente" });
-  } catch (error) {
-    console.error("Error general:", error);
-    res.status(500).json({ mensaje: "Error interno del servidor" });
-  }
 };
 
 // ─── Rutas ────────────────────────────────────────────────────
 
 // Pública — bonos disponibles
-app.get("/bonos/disponibles", async (req, res) => {
-  try {
-    let bonosDisponibles = await redisClient.get("bonos_disponibles");
-    if (!bonosDisponibles) {
-      const sheets = google.sheets({ version: "v4", auth });
-      const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
-        range: "A1",
-      });
-      bonosDisponibles = parseInt(response.data.values[0][0]);
-      await redisClient.set("bonos_disponibles", bonosDisponibles, {
-        EX: 3600,
-      });
-    } else {
-      bonosDisponibles = parseInt(bonosDisponibles);
-    }
+app.get('/bonos/disponibles', async (req, res) => {
+    try {
+        const bonosDisponibles = await redisClient.get('bonos_disponibles');
 
-    if (bonosDisponibles <= 0) {
-      return res.json({
-        mensaje: "¡Los bonos se han agotado!",
-        bonosDisponibles: 0,
-      });
+        // Si Redis no tiene el dato, significa que no se han cargado bonos aún
+        if (!bonosDisponibles) {
+            return res.json({ mensaje: 'No hay bonos cargados', bonosDisponibles: 0 });
+        }
+
+        const cantidad = parseInt(bonosDisponibles);
+
+        if (cantidad <= 0) {
+            return res.json({ mensaje: '¡Los bonos se han agotado!', bonosDisponibles: 0 });
+        }
+
+        res.json({ mensaje: 'Hay bonos disponibles', bonosDisponibles: cantidad });
+
+    } catch (error) {
+        console.error('Error al verificar bonos:', error);
+        res.status(500).json({ mensaje: 'Error al verificar los bonos' });
     }
-    res.json({ mensaje: "Hay bonos disponibles", bonosDisponibles });
-  } catch (error) {
-    console.error("Error al verificar bonos:", error);
-    res.status(500).json({ mensaje: "Error al verificar los bonos" });
-  }
 });
 
 // Protegida — registrar bono
@@ -266,22 +216,28 @@ app.post("/login", (req, res) => {
 });
 
 // Protegida — cargar nuevos bonos
-app.post("/bonos/cargar", verificarToken, async (req, res) => {
-  const { bonos } = req.body;
-  try {
-    await redisClient.set("bonos_disponibles", bonos, { EX: 3600 });
-    const sheets = google.sheets({ version: "v4", auth });
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: "A1",
-      valueInputOption: "USER_ENTERED",
-      resource: { values: [[bonos]] },
-    });
-    res.json({ mensaje: "Bonos actualizados correctamente" });
-  } catch (error) {
-    console.error("Error al cargar bonos:", error);
-    res.status(500).json({ mensaje: "Error al actualizar los bonos" });
-  }
+app.post('/bonos/cargar', verificarToken, async (req, res) => {
+    const { bonos } = req.body;
+    try {
+        // Guardar en Redis — fuente principal de verdad
+        await redisClient.set('bonos_disponibles', bonos);
+
+        // Guardar en Sheets solo como respaldo/referencia
+        // Es una sola escritura, no hay concurrencia aquí
+        const sheets = google.sheets({ version: 'v4', auth });
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: 'A1',
+            valueInputOption: 'USER_ENTERED',
+            resource: { values: [[bonos]] },
+        });
+
+        res.json({ mensaje: 'Bonos actualizados correctamente' });
+
+    } catch (error) {
+        console.error('Error al cargar bonos:', error);
+        res.status(500).json({ mensaje: 'Error al actualizar los bonos' });
+    }
 });
 
 // Protegida — obtener todos los registros del día desde Redis
@@ -312,65 +268,7 @@ app.get("/registros/hoy", verificarToken, async (req, res) => {
   }
 });
 
-// Protegida — sincronizar registros pendientes con Google Sheets
-app.post('/registros/sincronizar', verificarToken, async (req, res) => {
-    try {
-        const claves = await redisClient.keys('registrado:*');
 
-        if (claves.length === 0) {
-            return res.json({ mensaje: 'No hay registros para sincronizar', sincronizados: 0 });
-        }
-
-        const valores = await Promise.all(claves.map(c => redisClient.get(c)));
-        const todos = valores.map(v => JSON.parse(v));
-        const pendientes = todos.filter(r => r.sincronizado === false);
-
-        if (pendientes.length === 0) {
-            return res.json({ mensaje: 'Todos los registros ya están sincronizados', sincronizados: 0 });
-        }
-
-        const filas = pendientes.map(r => [
-            r.fechaHora, r.codigo, r.documento,
-            r.nombre, r.email, r.programa, r.recibo
-        ]);
-
-        // Intentar escribir en Sheets
-        await conReintentos(async () => {
-            const sheets = google.sheets({ version: 'v4', auth });
-            await sheets.spreadsheets.values.append({
-                spreadsheetId: SHEET_ID,
-                range: 'hoja1!A2:G',
-                valueInputOption: 'USER_ENTERED',
-                resource: { values: filas },
-            });
-        });
-
-        // ✅ Solo llega aquí si Sheets funcionó realmente
-        await Promise.all(
-            pendientes.map(r => {
-                r.sincronizado = true;
-                return redisClient.set(
-                    `registrado:${r.codigo}`,
-                    JSON.stringify(r),
-                    { KEEPTTL: true }
-                );
-            })
-        );
-
-        res.json({
-            mensaje: `${pendientes.length} registros sincronizados correctamente`,
-            sincronizados: pendientes.length
-        });
-
-    } catch (error) {
-        // ✅ Si Sheets falló, no se marca nada como sincronizado
-        // El admin puede intentar de nuevo
-        console.error('Error al sincronizar:', error);
-        res.status(500).json({ 
-            mensaje: 'Error al sincronizar. Los registros siguen pendientes, intenta de nuevo.',
-        });
-    }
-});
 
 // Pública — buscar estudiante por código
 app.get("/estudiante/:codigo", async (req, res) => {
@@ -417,12 +315,77 @@ app.post("/estudiantes/cargar", verificarToken, async (req, res) => {
   }
   try {
     await redisClient.set("base_estudiantes", JSON.stringify(estudiantes));
+    cacheEstudiantes = null;
     const total = Object.keys(estudiantes).length;
     res.json({ mensaje: "Base de datos cargada correctamente", total });
   } catch (error) {
     console.error("Error al cargar estudiantes:", error);
     res.status(500).json({ mensaje: "Error al cargar la base de datos" });
   }
+});
+
+// Protegida — enviar un registro individual a Google Sheets
+app.post('/registros/enviar', verificarToken, async (req, res) => {
+    const { codigo, codBono } = req.body;
+
+    if (!codigo) {
+        return res.status(400).json({ mensaje: 'El código es obligatorio' });
+    }
+
+    if (!codBono && codBono !== 0) {
+        return res.status(400).json({ mensaje: 'El número de bono es obligatorio' });
+    }
+
+    try {
+        // Obtener el registro desde Redis
+        const valor = await redisClient.get(`registrado:${codigo}`);
+        if (!valor) {
+            return res.status(404).json({ mensaje: 'Registro no encontrado' });
+        }
+
+        const registro = JSON.parse(valor);
+
+        if (registro.sincronizado) {
+            return res.status(400).json({ mensaje: 'Este registro ya fue sincronizado' });
+        }
+
+        // Intentar escribir en Sheets — un solo registro, no satura la API
+        const sheets = google.sheets({ version: 'v4', auth });
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: SHEET_ID,
+            range: 'hoja1!A2:H',  // H porque ahora hay 8 columnas
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+                values: [[
+                    registro.fechaHora,
+                    registro.codigo,
+                    registro.documento,
+                    registro.nombre,
+                    registro.email,
+                    registro.programa,
+                    registro.recibo,
+                    codBono  // ← columna nueva
+                ]]
+            },
+        });
+
+        // Sheets funcionó — actualizar registro en Redis
+        registro.codBono = codBono;
+        registro.sincronizado = true;
+
+        await redisClient.set(
+            `registrado:${codigo}`,
+            JSON.stringify(registro),
+            { KEEPTTL: true }
+        );
+
+        res.json({ mensaje: 'Registro enviado correctamente' });
+
+    } catch (error) {
+        console.error('Error al enviar registro:', error.message);
+        // No marcamos como sincronizado — la monitora puede reintentar
+        res.status(500).json({ mensaje: 'Error al enviar a Google Sheets, intenta de nuevo' });
+    }
 });
 
 // ─── Iniciar servidor ─────────────────────────────────────────
