@@ -2,7 +2,6 @@ const express = require("express");
 const { google } = require("googleapis");
 const cors = require("cors");
 const redis = require("redis");
-const rateLimit = require('express-rate-limit');
 require("dotenv").config();
 
 const app = express();
@@ -13,14 +12,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
 
-// ─── Rate Limiting ────────────────────────────────────────────
-const limitadorEstudiantes = rateLimit({
-    windowMs: 5 * 60 * 1000,
-    max: 20,
-    message: { mensaje: 'Demasiadas consultas, intenta más tarde' },
-    standardHeaders: true,
-    legacyHeaders: false,
-});
+
 
 // ─── Autenticación Google ─────────────────────────────────────
 const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
@@ -264,7 +256,7 @@ app.get("/registros/hoy", verificarToken, async (req, res) => {
 });
 
 // Protegida — buscar estudiante por código
-app.get('/estudiante/:codigo', verificarToken, limitadorEstudiantes, async (req, res) => {
+app.get('/estudiante/:codigo', verificarToken, async (req, res) => {
     const { codigo } = req.params;
     try {
         const estudiantes = await obtenerEstudiantes();
@@ -291,7 +283,7 @@ app.get('/estudiante/:codigo', verificarToken, limitadorEstudiantes, async (req,
 });
 
 // Protegida — verificar si ya registró hoy
-app.get('/estudiante/:codigo/registro', verificarToken, limitadorEstudiantes, async (req, res) => {
+app.get('/estudiante/:codigo/registro', verificarToken, async (req, res) => {
     const { codigo } = req.params;
     try {
         const valor = await redisClient.get(`registrado:${codigo}`);
