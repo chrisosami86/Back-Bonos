@@ -13,6 +13,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.0",
+    "express-rate-limit": "^8.4.1",
     "googleapis": "^144.0.0",
     "redis": "^4.7.1"
   },
